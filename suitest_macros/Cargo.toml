@@ -1,0 +1,15 @@
+[package]
+name = "suitest_macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["biblius <crazycompanyxxl@gmail.com>"]
+description = "suitest macros"
+homepage = "https://github.com/biblius/suitest"
+keywords = ["suitest", "test", "hooks", "testing"]
+license = "MIT"
+readme = "../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]

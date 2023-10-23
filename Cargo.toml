@@ -1,0 +1,3 @@
+[workspace]
+members = ["suitest", "suitest_macros"]
+resolver = "2"

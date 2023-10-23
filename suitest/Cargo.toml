@@ -1,0 +1,12 @@
+[package]
+name = "suitest"
+version = "0.1.0"
+edition = "2021"
+authors = ["biblius <crazycompanyxxl@gmail.com>"]
+description = "A library for quality of life test suites"
+homepage = "https://github.com/biblius/suitest"
+keywords = ["suitest", "test", "hooks", "testing"]
+license = "MIT"
+readme = "../README.md"
+
+[dependencies]
