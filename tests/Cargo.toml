@@ -1,0 +1,10 @@
+[package]
+edition = "2021"
+name = "tests"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+suitest = { path = "../suitest" }
+tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros"] }

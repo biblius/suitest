@@ -1,3 +1,3 @@
 [workspace]
-members = ["suitest", "suitest_macros"]
+members = ["suitest", "suitest_macros", "tests"]
 resolver = "2"

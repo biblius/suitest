@@ -1,12 +1,16 @@
 [package]
-name = "suitest"
-version = "0.1.0"
-edition = "2021"
 authors = ["biblius <crazycompanyxxl@gmail.com>"]
 description = "A library for quality of life test suites"
+edition = "2021"
 homepage = "https://github.com/biblius/suitest"
-keywords = ["suitest", "test", "hooks", "testing"]
+keywords = ["hooks", "suitest", "test", "testing"]
 license = "MIT"
+name = "suitest"
 readme = "../README.md"
+version = "0.1.0"
 
 [dependencies]
+futures-util = "0.3.28"
+once_cell = "1.18.0"
+suitest_macros = { path = "../suitest_macros" }
+tokio = { version = "1.33.0", features = ["rt-multi-thread", "macros", "sync"] }

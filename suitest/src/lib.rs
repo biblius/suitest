@@ -1,14 +1,10 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+mod state;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use state::State;
+pub use suitest_macros::*;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub mod internal {
+    pub use futures_util;
+    pub use once_cell;
+    pub use once_cell::sync::OnceCell;
 }
