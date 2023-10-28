@@ -1,6 +1,5 @@
-mod state;
+#![doc = include_str!(concat!("../", std::env!("CARGO_PKG_README")))]
 
-pub use state::State;
 pub use suitest_macros::*;
 
 pub mod internal {

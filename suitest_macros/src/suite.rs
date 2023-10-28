@@ -1,4 +1,5 @@
 use proc_macro_error::abort;
+use quote::{quote, ToTokens};
 use syn::{
     parse::ParseBuffer, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
     ExprLit, ExprPath, ExprTuple, FnArg, Ident, ItemFn, Lit, MetaNameValue, ReturnType, Token,
@@ -42,6 +43,9 @@ pub struct TestSuite {
 
     /// The function to call after a test fails.
     pub cleanup: Option<SuiteFn>,
+
+    /// Used to determine whether to generate the runtime tokens.
+    pub is_async: bool,
 }
 
 impl TestSuite {
@@ -55,6 +59,7 @@ impl TestSuite {
             after_all: None,
             after_each: None,
             cleanup: None,
+            is_async: false,
         }
     }
 
@@ -63,6 +68,10 @@ impl TestSuite {
         // be collecting these from the state
         let inputs = std::mem::take(&mut item.sig.inputs);
 
+        if item.sig.asyncness.is_some() {
+            self.is_async = true;
+        }
+
         for attr in item.attrs.iter() {
             let Some(attr_ident) = attr.path().segments.last() else {
                 continue;
@@ -70,6 +79,9 @@ impl TestSuite {
 
             match attr_ident.ident.to_string().as_str() {
                 TEST => {
+                    if !matches!(item.sig.output, ReturnType::Default) {
+                        abort!(item.sig.output.span(), "tests cannot return values")
+                    }
                     self.tests.push(TestFn::new(*id, item, inputs));
                     *id += 1;
                     break;
@@ -91,10 +103,16 @@ impl TestSuite {
                     break;
                 }
                 AFTER_ALL => {
+                    if !matches!(item.sig.output, ReturnType::Default) {
+                        abort!(item.sig.output.span(), "after_* hooks cannot return values")
+                    }
                     self.after_all = Some(SuiteFn::new(item, inputs));
                     break;
                 }
                 AFTER_EACH => {
+                    if !matches!(item.sig.output, ReturnType::Default) {
+                        abort!(item.sig.output.span(), "after_* hooks cannot return values")
+                    }
                     self.after_each = Some(SuiteFn::new(item, inputs));
                     break;
                 }
@@ -200,6 +218,79 @@ pub struct TestFn {
 impl TestFn {
     fn new(id: usize, item: ItemFn, inputs: Punctuated<FnArg, Comma>) -> Self {
         Self { id, item, inputs }
+    }
+}
+
+/// Holds the expanded function definition, its ident and whether it is async.
+pub struct FnQuote {
+    /// The expanded definition containing state getters and setters
+    pub tokens: proc_macro2::TokenStream,
+
+    /// The ident of the function used to invoke it in quote!().
+    pub id: Ident,
+
+    pub is_async: bool,
+}
+
+impl FnQuote {
+    pub fn new(tokens: proc_macro2::TokenStream, id: Ident, is_async: bool) -> Self {
+        Self {
+            tokens,
+            id,
+            is_async,
+        }
+    }
+
+    pub fn quote_invoke_task(&self, const_id: &Ident) -> proc_macro2::TokenStream {
+        let id = &self.id;
+
+        if self.is_async {
+            quote!(#id ::<#const_id> ().await;)
+        } else {
+            quote!(#id ::<#const_id> ();)
+        }
+    }
+
+    pub fn quote_invoke_suite(&self) -> proc_macro2::TokenStream {
+        let id = &self.id;
+        if self.is_async {
+            quote!(rt.block_on(#id());)
+        } else {
+            quote!(#id();)
+        }
+    }
+}
+
+impl ToTokens for FnQuote {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        tokens.extend(self.tokens.clone())
+    }
+}
+
+/// The info needed to invoke a task and its cleanup if any
+pub struct TaskQuote {
+    /// The task variable
+    pub id: Ident,
+
+    /// The constant variable related to this task
+    pub const_id: Ident,
+
+    /// Whether or not to run cleanup if the task fails and
+    /// whether or not it is async
+    pub cleanup: Option<(Ident, bool)>,
+
+    /// The name of the thread that will get spawned
+    pub fn_id: Ident,
+}
+
+impl TaskQuote {
+    pub fn new(id: Ident, fn_id: Ident, const_id: Ident, cleanup: Option<(Ident, bool)>) -> Self {
+        Self {
+            id,
+            fn_id,
+            const_id,
+            cleanup,
+        }
     }
 }
 

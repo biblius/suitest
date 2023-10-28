@@ -7,7 +7,7 @@ keywords = ["hooks", "suitest", "test", "testing"]
 license = "MIT"
 name = "suitest_macros"
 readme = "../README.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [lib]
 proc-macro = true
