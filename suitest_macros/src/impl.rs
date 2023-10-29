@@ -7,7 +7,7 @@ use syn::{
 
 use crate::suite::{
     FnQuote, PathOrTupleExpr, PathOrTupleReturn, StateModifier, SuiteConfig, SuiteFn, TaskQuote,
-    TestFn, TestSuite,
+    TestFn, TestSuite, ANNOTATIONS,
 };
 
 pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
@@ -35,7 +35,16 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
     for item in items {
         // We are interested only in functions
         if let syn::Item::Fn(item) = item {
-            suite.process_fn(&mut i, item);
+            if item.attrs.iter().any(|a| {
+                let Some(p) = a.path().segments.last() else {
+                    return false;
+                };
+                ANNOTATIONS.contains(&p.ident.to_string().as_str())
+            }) {
+                suite.process_fn(&mut i, item);
+            } else {
+                other.push(syn::Item::Fn(item));
+            }
         } else {
             other.push(item);
         }
@@ -245,17 +254,15 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
 }
 
 fn quote_seq_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
-    let mut tokens = quote!(
-        use suitest::internal::futures_util::FutureExt;
-    );
+    let mut tokens = quote!();
     for task in tasks {
         let id = &task.id;
         let fn_id = &task.fn_id.to_string();
         tokens.extend(quote!(
-            let result = rt.block_on(#id.catch_unwind());
+            let result = rt.block_on(async { tokio::spawn(#id).await });
             if let Err(e) = result {
                 eprintln!("{} ... x", #fn_id);
-                errors.push(e);
+                errors.push(e.into_panic());
             }
         ));
     }
@@ -265,7 +272,7 @@ fn quote_seq_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
 fn quote_par_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
     let spawns = tasks.iter().map(|t| {
         let id = &t.id;
-        quote!(tokio::spawn(#id),)
+        quote!(tokio::spawn(Box::pin(#id)),)
     });
 
     let msg = tasks.iter().map(|t| {
@@ -456,12 +463,18 @@ fn quote_state_getters(
         let ty_display = type_display(None, ty);
         let expect = format!("unitialised item '{ty_display}' at '{fn_id}'");
         let downcast_fail = format!("downcast to '{ty_display}' failed");
+        let local_miss =
+            format!("{fn_id} - {ty_display} not found in local state, getting from global");
+        let local_miss = verbose.then_some(quote!(println!(#local_miss);));
         let getters = if local {
             quote!(
                 let #id: #ty = unsafe {
                     LOCAL[LOCAL_ID]
                         .get(&::std::any::TypeId::of::<#ty>())
-                        .or_else(|| GLOBAL.get(&::std::any::TypeId::of::<#ty>()))
+                        .or_else(|| {
+                            #local_miss
+                            GLOBAL.get(&::std::any::TypeId::of::<#ty>())
+                        })
                         .expect(#expect)
                         .downcast_ref::<#ty>()
                         .cloned()
@@ -515,8 +528,8 @@ fn quote_state_setters(
             if !verbose {
                 return quote!(
                     #state_map
-                    state.insert(::std::any::TypeId::of::<#ret_path>(), Box::new(#expr_path)
-                ));
+                    state.insert(::std::any::TypeId::of::<#ret_path>(), Box::new(#expr_path));
+                );
             }
             use ::std::fmt::Write;
             let mut result = String::new();
@@ -535,7 +548,7 @@ fn quote_state_setters(
             quote!(
                 #printed
                 #state_map
-                state.insert(::std::any::TypeId::of::<#ret_path>(), Box::new(#expr_path))
+                state.insert(::std::any::TypeId::of::<#ret_path>(), Box::new(#expr_path));
             )
         }
         (PathOrTupleReturn::Tuple(ret_tup), PathOrTupleExpr::Tuple(expr_tup)) => {

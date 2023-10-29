@@ -7,12 +7,20 @@ use syn::{
 };
 
 // Suite markers
-const TEST: &str = "test";
-const BEFORE_ALL: &str = "before_all";
-const AFTER_ALL: &str = "after_all";
-const BEFORE_EACH: &str = "before_each";
-const AFTER_EACH: &str = "after_each";
-const CLEANUP: &str = "cleanup";
+pub const TEST: &str = "test";
+pub const BEFORE_ALL: &str = "before_all";
+pub const AFTER_ALL: &str = "after_all";
+pub const BEFORE_EACH: &str = "before_each";
+pub const AFTER_EACH: &str = "after_each";
+pub const CLEANUP: &str = "cleanup";
+pub const ANNOTATIONS: &[&str] = &[
+    TEST,
+    BEFORE_ALL,
+    BEFORE_EACH,
+    AFTER_ALL,
+    AFTER_EACH,
+    CLEANUP,
+];
 
 // Configuration markers
 const VERBOSE: &str = "verbose";

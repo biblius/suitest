@@ -68,11 +68,14 @@ pub mod async_tests {
         qux: usize,
     }
 
+    async fn something() {}
+
     #[suitest::cleanup]
     async fn cleaning() {}
 
     #[before_all]
     async fn setup() -> (usize, MyTestStruct) {
+        something().await;
         (420_usize, MyTestStruct { qux: 69 })
     }
 

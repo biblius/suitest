@@ -125,9 +125,10 @@ pub mod prototype_with_maps {
 
         // SEQ ASYNC
 
-        let result = rt.block_on(task0.catch_unwind());
+        use suitest::internal::futures_util;
+        let result = rt.block_on(async { tokio::spawn(task0).await });
         if let Err(e) = result {
-            errors.push(e);
+            errors.push(e.into_panic());
         }
 
         let result = rt.block_on(task1.catch_unwind());
