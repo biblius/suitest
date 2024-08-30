@@ -1,8 +1,8 @@
 use proc_macro_error::abort;
 use quote::{format_ident, quote};
 use syn::{
-    punctuated::Punctuated, spanned::Spanned, token::Comma, FnArg, Ident, ItemFn, ItemMod, Pat,
-    Signature,
+    punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, FnArg, Ident, ItemFn, ItemMod,
+    Pat, Signature, Type,
 };
 
 use crate::suite::{
@@ -212,9 +212,13 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
         #vis #mod_token #ident {
             #(#other)*
 
-            type AnyMap = ::std::collections::HashMap<::std::any::TypeId, Box<dyn ::std::any::Any + Send + Sync>>;
-            static mut GLOBAL: suitest::internal::once_cell::sync::Lazy<AnyMap> = suitest::internal::once_cell::sync::Lazy::new(::std::collections::HashMap::new);
+            type AnyMapValue = ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>;
+            type AnyMap = ::std::collections::HashMap<::std::any::TypeId, AnyMapValue>;
+            type LazyMap = ::suitest::internal::once_cell::sync::Lazy<AnyMap>;
+            static mut GLOBAL: LazyMap = LazyMap::new(|| AnyMap::new());
+
             #local_map
+
             #(const #ids: usize = #id_lits;)*
 
             #before_all
@@ -460,36 +464,59 @@ fn quote_state_getters(
             )
         };
 
+        // Print statements
         let ty_display = type_display(None, ty);
         let expect = format!("unitialised item '{ty_display}' at '{fn_id}'");
-        let downcast_fail = format!("downcast to '{ty_display}' failed");
         let local_miss =
             format!("{fn_id} - {ty_display} not found in local state, getting from global");
         let local_miss = verbose.then_some(quote!(println!(#local_miss);));
+
         let getters = if local {
             quote!(
+                // SAFETY: Multiple immutable references are fine.
+                // We are never modifying the GLOBAL state other
+                // than in *_all hooks, only reading from it.
                 let #id: #ty = unsafe {
-                    LOCAL[LOCAL_ID]
+                    let item = LOCAL[LOCAL_ID]
                         .get(&::std::any::TypeId::of::<#ty>())
                         .or_else(|| {
                             #local_miss
                             GLOBAL.get(&::std::any::TypeId::of::<#ty>())
                         })
-                        .expect(#expect)
+                        .expect(#expect);
+                    item
                         .downcast_ref::<#ty>()
                         .cloned()
-                        .expect(#downcast_fail)
+                        .unwrap_or_else(||
+                            panic!(
+                                    "downcast to '{}' failed; expected '{:?}', found '{:?}'",
+                                    #ty_display,
+                                    ::std::any::TypeId::of::<#ty>(),
+                                    item.type_id()
+                            )
+                        )
                 };
             )
         } else {
             quote!(
-                let #id = unsafe {
-                    GLOBAL
+                // SAFETY: Multiple immutable references are fine.
+                // We are never modifying the global state other
+                // than in *_all hooks, only reading from it.
+                let #id: #ty = unsafe {
+                    let item = GLOBAL
                         .get(&::std::any::TypeId::of::<#ty>())
-                        .expect(#expect)
+                        .expect(#expect);
+                    item
                         .downcast_ref::<#ty>()
                         .cloned()
-                        .expect(#downcast_fail)
+                        .unwrap_or_else(||
+                            panic!(
+                                    "downcast to '{}' failed; expected '{:?}', found '{:?}'",
+                                    #ty_display,
+                                    ::std::any::TypeId::of::<#ty>(),
+                                    item.type_id()
+                            )
+                        )
                 };
             )
         };
@@ -525,14 +552,10 @@ fn quote_state_setters(
 
     match (&modifier.fn_output, &modifier.last_block_item) {
         (PathOrTupleReturn::Path(ret_path), PathOrTupleExpr::Path(expr_path)) => {
-            if !verbose {
-                return quote!(
-                    #state_map
-                    state.insert(::std::any::TypeId::of::<#ret_path>(), Box::new(#expr_path));
-                );
-            }
             use ::std::fmt::Write;
+
             let mut result = String::new();
+
             for (i, seg) in ret_path.path.segments.iter().enumerate() {
                 if i == ret_path.path.segments.len() - 1 {
                     write!(result, "{}", seg.ident).unwrap()
@@ -540,58 +563,67 @@ fn quote_state_setters(
                     write!(result, "{}::", seg.ident).unwrap()
                 }
             }
+
             let printed = format!(
-                "{fn_id} - getting {result} from {} state",
+                "{fn_id} - setting {result} to {} state",
                 if local { "local" } else { "global" }
             );
-            let printed = quote!(println!(#printed););
+
+            let printed = verbose.then_some(quote!(println!(#printed);));
+
             quote!(
+            {
                 #printed
                 #state_map
-                state.insert(::std::any::TypeId::of::<#ret_path>(), Box::new(#expr_path));
-            )
+                let boxed = Box::new(#expr_path);
+                let type_id = ::std::any::TypeId::of::<#ret_path>();
+                assert_eq!(type_id, <#ret_path as ::std::any::Any>::type_id(&*boxed), "type mismatch; check test hooks for correct types");
+                state.insert(type_id, boxed);
+            })
         }
         (PathOrTupleReturn::Tuple(ret_tup), PathOrTupleExpr::Tuple(expr_tup)) => {
-            let ty_elems = ret_tup
+            let ret_elems = ret_tup
                 .elems
                 .pairs()
                 .map(|pair| pair.into_value())
-                .collect::<Vec<_>>();
-            let val_elems = expr_tup
-                .elems
-                .pairs()
-                .map(|pair| pair.into_value())
-                .collect::<Vec<_>>();
+                .collect::<Vec<&Type>>();
 
-            if ty_elems.len() != val_elems.len() {
-                abort!(modifier.span(), "return value mismatch")
+            let expr_elems = expr_tup
+                .elems
+                .pairs()
+                .map(|pair| pair.into_value())
+                .collect::<Vec<&Expr>>();
+
+            if ret_elems.len() != expr_elems.len() {
+                abort!(
+                    modifier.span(),
+                    "return value mismatch, expected {} items in return",
+                    ret_elems.len()
+                )
             }
 
-            let printed = ty_elems.iter().map(|el| {
+            let printed = ret_elems.iter().map(|el| {
+                if !verbose {
+                    return None;
+                }
                 let ty_display = type_display(None, el);
                 let msg = format!(
-                    "{fn_id} - inserting {ty_display} to {} state",
+                    "{fn_id} - setting {ty_display} to {} state",
                     if local { "local" } else { "global" }
                 );
-                quote!(println!(#msg);)
+                Some(quote!(println!(#msg);))
             });
 
-            if verbose {
-                quote!(
-                    #state_map
-                    #(
-                        #printed
-                        state.insert(::std::any::TypeId::of::<#ty_elems>(), Box::new(#val_elems));
-                    )*
-                )
-            } else {
-                quote!(
-                    #state_map
-                    #(
-                        state.insert(::std::any::TypeId::of::<#ty_elems>(), Box::new(#val_elems));
-                    )*
-                )
-            }
+            quote!(
+                #state_map
+                #({
+                    #printed
+                    let boxed = Box::new(#expr_elems);
+                    let type_id = ::std::any::TypeId::of::<#ret_elems>();
+                    assert_eq!(type_id, <#ret_elems as ::std::any::Any>::type_id(&*boxed), "type mismatch; check test hooks for correct types");
+                    state.insert(type_id, boxed);
+                })*
+            )
         }
         _ => {
             abort!(modifier.span(), "return value mismatch")
