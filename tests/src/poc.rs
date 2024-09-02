@@ -56,7 +56,7 @@ pub mod prototype_with_maps {
     }
 
     fn after_each<const ID: usize>() {
-        // SAFETY: Local IDs are fine due to sequential.
+        // SAFETY: Local IDs are fine because they are sequential.
         // We know the global state contains no mutable references because
         // this always runs in between the *_all hooks.
         // Tests and *_each hooks never mutably access the global state.
@@ -75,6 +75,16 @@ pub mod prototype_with_maps {
         // SAFETY: We know this is the only test that can access the map under the index ID.
         // Since hooks do not run while this test is running, nothing else is touching the map
         // which means we're good to go.
+        let state = unsafe { &mut LOCAL[ID] };
+        let num = state
+            .get(&TypeId::of::<usize>())
+            .expect("item not in state")
+            .downcast_ref::<usize>()
+            .expect("the impossible");
+        assert_eq!(*num, 420_usize);
+    }
+
+    async fn cleanup<const ID: usize>() {
         let state = unsafe { &mut LOCAL[ID] };
         let num = state
             .get(&TypeId::of::<usize>())

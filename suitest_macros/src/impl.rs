@@ -1,13 +1,12 @@
+use crate::suite::{
+    FnQuote, PathOrTupleExpr, PathOrTupleReturn, StateModifier, SuiteConfig, SuiteFn, TaskQuote,
+    TestFn, TestSuite,
+};
 use proc_macro_error::abort;
 use quote::{format_ident, quote};
 use syn::{
     punctuated::Punctuated, spanned::Spanned, token::Comma, Expr, FnArg, Ident, ItemFn, ItemMod,
     Pat, Signature, Type,
-};
-
-use crate::suite::{
-    FnQuote, PathOrTupleExpr, PathOrTupleReturn, StateModifier, SuiteConfig, SuiteFn, TaskQuote,
-    TestFn, TestSuite, ANNOTATIONS,
 };
 
 pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
@@ -23,31 +22,16 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
 
     let (_, items) = item_mod.content.unwrap();
 
+    // Parse top level `suite_cfg`.
     let config = SuiteConfig::parse(&item_mod.attrs);
 
     let mut suite = TestSuite::new(id, config);
 
-    // Holds all non-fn items
-    let mut other = vec![];
-
+    // Identifiers for local test states
     let mut i = 0;
 
     for item in items {
-        // We are interested only in functions
-        if let syn::Item::Fn(item) = item {
-            if item.attrs.iter().any(|a| {
-                let Some(p) = a.path().segments.last() else {
-                    return false;
-                };
-                ANNOTATIONS.contains(&p.ident.to_string().as_str())
-            }) {
-                suite.process_fn(&mut i, item);
-            } else {
-                other.push(syn::Item::Fn(item));
-            }
-        } else {
-            other.push(item);
-        }
+        suite.process_item(&mut i, item)
     }
 
     let ItemMod {
@@ -68,6 +52,7 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
         after_each,
         cleanup,
         is_async,
+        other_items: other,
     } = suite;
 
     // If any of the fns are async a tokio runtime needs to be spawned
@@ -215,7 +200,7 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
             type AnyMapValue = ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>;
             type AnyMap = ::std::collections::HashMap<::std::any::TypeId, AnyMapValue>;
             type LazyMap = ::suitest::internal::once_cell::sync::Lazy<AnyMap>;
-            static mut GLOBAL: LazyMap = LazyMap::new(|| AnyMap::new());
+            static mut __GLOBAL: LazyMap = LazyMap::new(|| AnyMap::new());
 
             #local_map
 
@@ -262,10 +247,19 @@ fn quote_seq_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
     for task in tasks {
         let id = &task.id;
         let fn_id = &task.fn_id.to_string();
+        let const_id = &task.const_id;
+        let cleanup = task.cleanup.as_ref().map(|(cleanup, is_async)| {
+            if *is_async {
+                quote!(rt.block_on(#cleanup::<#const_id>());)
+            } else {
+                quote!(#cleanup::<#const_id>();)
+            }
+        });
         tokens.extend(quote!(
-            let result = rt.block_on(async { tokio::spawn(#id).await });
+            let result = rt.block_on(rt.spawn(#id));
             if let Err(e) = result {
                 eprintln!("{} ... x", #fn_id);
+                #cleanup
                 errors.push(e.into_panic());
             }
         ));
@@ -276,7 +270,7 @@ fn quote_seq_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
 fn quote_par_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
     let spawns = tasks.iter().map(|t| {
         let id = &t.id;
-        quote!(tokio::spawn(Box::pin(#id)),)
+        quote!(rt.spawn(::std::boxed::Box::pin(#id)),)
     });
 
     let msg = tasks.iter().map(|t| {
@@ -284,12 +278,24 @@ fn quote_par_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
         quote!(#id)
     });
 
+    let cleanups = tasks.iter().map(|t| {
+        let const_id = &t.const_id;
+        t.cleanup.as_ref().map(|(cleanup, is_async)| {
+            let cleanup = if *is_async {
+                quote!(rt.block_on(#cleanup::<#const_id>());)
+            } else {
+                quote!(#cleanup::<#const_id>();)
+            };
+            quote!(if i == #const_id { #cleanup })
+        })
+    });
+
     quote!(
-        let results = rt.block_on(async {
+        let results = rt.block_on(
             suitest::internal::futures_util::future::join_all(
                 vec![#(#spawns)*]
-            ).await
-        });
+            )
+        );
 
         let msgs = [
             #(#msg),*
@@ -298,6 +304,7 @@ fn quote_par_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
                 eprintln!("{}", msgs[i]);
+                #(#cleanups)*
                 errors.push(e.into_panic());
             }
         }
@@ -305,8 +312,6 @@ fn quote_par_exec_async(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
 }
 
 fn quote_par_exec_sync(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
-    let handles = quote!(let mut handles = vec![];);
-
     let task_invokes = tasks.iter().map(|t| {
         let (id, thread_id) = (&t.id, t.fn_id.to_string());
         quote!(
@@ -314,13 +319,14 @@ fn quote_par_exec_sync(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
             handles.push(thread.spawn(#id).expect("could not spawn test thread"));
         )
     });
+
     let const_ids = tasks.iter().map(|t| &t.const_id).collect::<Vec<_>>();
     let cleanups = tasks.iter().zip(const_ids.iter()).map(|(t, const_id)| {
-        t.cleanup.as_ref().map(|(cu, is_async)| {
+        t.cleanup.as_ref().map(|(cleanup, is_async)| {
             if *is_async {
-                quote!(rt.block_on(#cu::<#const_id>());)
+                quote!(rt.block_on(#cleanup::<#const_id>());)
             } else {
-                quote!(#cu::<#const_id>();)
+                quote!(#cleanup::<#const_id>();)
             }
         })
     });
@@ -331,7 +337,7 @@ fn quote_par_exec_sync(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
     });
 
     quote!(
-        #handles
+        let mut handles = vec![];
         #(#task_invokes)*
         for (i, handle) in handles.into_iter().enumerate() {
             let result = handle.join();
@@ -362,11 +368,11 @@ fn quote_seq_exec_sync(tasks: &[TaskQuote]) -> proc_macro2::TokenStream {
             ..
         } = task;
 
-        let cleanup = cleanup.as_ref().map(|(cu, is_async)| {
+        let cleanup = cleanup.as_ref().map(|(cleanup, is_async)| {
             if *is_async {
-                quote!(rt.block_on(#cu::<#const_id>());)
+                quote!(rt.block_on(#cleanup::<#const_id>());)
             } else {
-                quote!(#cu::<#const_id>();)
+                quote!(#cleanup::<#const_id>();)
             }
         });
 
@@ -474,14 +480,14 @@ fn quote_state_getters(
         let getters = if local {
             quote!(
                 // SAFETY: Multiple immutable references are fine.
-                // We are never modifying the GLOBAL state other
+                // We are never modifying the __GLOBAL state other
                 // than in *_all hooks, only reading from it.
                 let #id: #ty = unsafe {
                     let item = LOCAL[LOCAL_ID]
                         .get(&::std::any::TypeId::of::<#ty>())
                         .or_else(|| {
                             #local_miss
-                            GLOBAL.get(&::std::any::TypeId::of::<#ty>())
+                            __GLOBAL.get(&::std::any::TypeId::of::<#ty>())
                         })
                         .expect(#expect);
                     item
@@ -503,7 +509,7 @@ fn quote_state_getters(
                 // We are never modifying the global state other
                 // than in *_all hooks, only reading from it.
                 let #id: #ty = unsafe {
-                    let item = GLOBAL
+                    let item = __GLOBAL
                         .get(&::std::any::TypeId::of::<#ty>())
                         .expect(#expect);
                     item
@@ -547,7 +553,7 @@ fn quote_state_setters(
     let state_map = if local {
         quote!(let state = unsafe { &mut LOCAL[LOCAL_ID] };)
     } else {
-        quote!(let state = unsafe { &mut GLOBAL };)
+        quote!(let state = unsafe { &mut __GLOBAL };)
     };
 
     match (&modifier.fn_output, &modifier.last_block_item) {

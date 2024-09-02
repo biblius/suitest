@@ -2,8 +2,8 @@ use proc_macro_error::abort;
 use quote::{quote, ToTokens};
 use syn::{
     parse::ParseBuffer, punctuated::Punctuated, spanned::Spanned, token::Comma, Attribute, Expr,
-    ExprLit, ExprPath, ExprTuple, FnArg, Ident, ItemFn, Lit, MetaNameValue, ReturnType, Token,
-    TypePath, TypeTuple,
+    ExprLit, ExprPath, ExprTuple, FnArg, Ident, Item, ItemFn, Lit, MetaNameValue, ReturnType,
+    Token, TypePath, TypeTuple,
 };
 
 // Suite markers
@@ -54,6 +54,9 @@ pub struct TestSuite {
 
     /// Used to determine whether to generate the runtime tokens.
     pub is_async: bool,
+
+    // Holds all non-test items such as structs, imports, etc.
+    pub other_items: Vec<Item>,
 }
 
 impl TestSuite {
@@ -68,10 +71,27 @@ impl TestSuite {
             after_each: None,
             cleanup: None,
             is_async: false,
+            other_items: vec![],
         }
     }
 
-    pub fn process_fn(&mut self, id: &mut usize, mut item: ItemFn) {
+    pub fn process_item(&mut self, id: &mut usize, item: Item) {
+        // We are interested only in functions
+        let syn::Item::Fn(mut item) = item else {
+            self.other_items.push(item);
+            return;
+        };
+
+        if !item.attrs.iter().any(|a| {
+            let Some(p) = a.path().segments.last() else {
+                return false;
+            };
+            ANNOTATIONS.contains(&p.ident.to_string().as_str())
+        }) {
+            self.other_items.push(syn::Item::Fn(item));
+            return;
+        }
+
         // Remove the function arguments for the final function as we will
         // be collecting these from the state
         let inputs = std::mem::take(&mut item.sig.inputs);
@@ -81,7 +101,7 @@ impl TestSuite {
         }
 
         for attr in item.attrs.iter() {
-            let Some(attr_ident) = attr.path().segments.last() else {
+            let Some(attr_ident) = attr.path().segments.first() else {
                 continue;
             };
 
@@ -153,7 +173,14 @@ impl TestSuite {
 
         // Skip if empty
         let last_stmt = item.block.stmts.pop()?;
+
+        // Do not abort if the fn does not return anything
+        if let ReturnType::Default = item.sig.output {
+            return None;
+        }
+
         let last_block_item = match last_stmt {
+            // Matches
             syn::Stmt::Expr(ref expr, tok) if tok.is_none() => match expr {
                 syn::Expr::Path(ref p) => PathOrTupleExpr::Path(p.clone()),
                 syn::Expr::Tuple(ref t) => PathOrTupleExpr::Tuple(t.clone()),
@@ -162,9 +189,6 @@ impl TestSuite {
                     "before_* hooks must return owned values (or tuples of)"
                 ),
             },
-
-            // Do not abort if the fn does not return anything
-            _ if matches!(item.sig.output, ReturnType::Default) => return None,
 
             // We only accept expressions on before_* hooks
             _ => abort!(
@@ -249,6 +273,7 @@ impl FnQuote {
         }
     }
 
+    // Invokes the function with `.await` or without it.
     pub fn quote_invoke_task(&self, const_id: &Ident) -> proc_macro2::TokenStream {
         let id = &self.id;
 
@@ -259,6 +284,8 @@ impl FnQuote {
         }
     }
 
+    /// Invokes the suite function either blocking on a tokio runtime
+    /// or by just invoking it.
     pub fn quote_invoke_suite(&self) -> proc_macro2::TokenStream {
         let id = &self.id;
         if self.is_async {
