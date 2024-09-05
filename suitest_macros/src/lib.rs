@@ -102,17 +102,20 @@ pub fn before_all(
 /// ## Example
 ///
 /// ```ignore
+/// use suitest::{before_all, before_each};
+///
 /// struct MyStruct {
 ///     a: bool,
 /// }
 ///
-/// #[suitest::before_all]
-/// fn setup_test() -> MyStruct {
+/// #[before_all]
+/// fn setup_global() -> MyStruct {
 ///     MyStruct { a: true }
 /// }
 ///
-/// #[suitest::before_each]
-/// fn setup_test() -> String {
+/// #[before_each]
+/// fn setup_local(my_struct: MyStruct) -> String {
+///     assert!(ms.a);
 ///     String::from("Hello world")
 /// }
 ///

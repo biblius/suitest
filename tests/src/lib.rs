@@ -29,7 +29,7 @@ pub mod parallel {
 
     #[after_all]
     async fn teardown(chosen: usize, my_stuff: MyTestStruct) {
-        assert_eq!(chosen, 420);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 
@@ -37,8 +37,8 @@ pub mod parallel {
     fn works(works: (String, String), magic: u8, chosen: usize, my_stuff: MyTestStruct) {
         assert_eq!(works.0, "works");
         assert_eq!(works.1, "tuple");
-        assert_eq!(magic, 69);
-        assert_eq!(chosen, 420);
+        assert_eq!(*magic, 69);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 }
@@ -75,7 +75,7 @@ pub mod sequential {
 
     #[after_all]
     async fn teardown(chosen: usize, my_stuff: MyTestStruct) {
-        assert_eq!(chosen, 420);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 
@@ -83,8 +83,8 @@ pub mod sequential {
     fn works(works: (String, String), magic: u8, chosen: usize, my_stuff: MyTestStruct) {
         assert_eq!(works.0, "works");
         assert_eq!(works.1, "tuple");
-        assert_eq!(magic, 69);
-        assert_eq!(chosen, 420);
+        assert_eq!(*magic, 69);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 }
@@ -121,7 +121,7 @@ pub mod async_parallel {
 
     #[after_all]
     async fn teardown(chosen: usize, my_stuff: MyTestStruct) {
-        assert_eq!(chosen, 420);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 
@@ -129,8 +129,8 @@ pub mod async_parallel {
     async fn works(works: (String, String), magic: u8, chosen: usize, my_stuff: MyTestStruct) {
         assert_eq!(works.0, "works");
         assert_eq!(works.1, "tuple");
-        assert_eq!(magic, 69);
-        assert_eq!(chosen, 420);
+        assert_eq!(*magic, 69);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 }
@@ -167,7 +167,7 @@ pub mod async_sequential {
 
     #[after_all]
     async fn teardown(chosen: usize, my_stuff: MyTestStruct) {
-        assert_eq!(chosen, 420);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 
@@ -175,8 +175,8 @@ pub mod async_sequential {
     async fn works(works: (String, String), magic: u8, chosen: usize, my_stuff: MyTestStruct) {
         assert_eq!(works.0, "works");
         assert_eq!(works.1, "tuple");
-        assert_eq!(magic, 69);
-        assert_eq!(chosen, 420);
+        assert_eq!(*magic, 69);
+        assert_eq!(*chosen, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 }

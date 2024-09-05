@@ -83,7 +83,7 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
         }
         v
     };
-    let local_map = quote!(static mut LOCAL: [suitest::internal::once_cell::sync::Lazy<AnyMap>; #len] = [#(#maps)*];);
+    let local_map = quote!(static mut __LOCAL: [suitest::internal::once_cell::sync::Lazy<__AnyMap>; #len] = [#(#maps)*];);
 
     let verbose = config.verbose;
 
@@ -176,6 +176,7 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
         test_tasks.extend(tokens);
     }
 
+    // Call sync implementations.
     let exec_sync = (!tasks_sync.is_empty()).then(|| {
         if config.sequential {
             quote_seq_exec_sync(&tasks_sync)
@@ -184,6 +185,7 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
         }
     });
 
+    // Call async implementations.
     let exec_async = (!tasks_async.is_empty()).then(|| {
         if config.sequential {
             quote_seq_exec_async(&tasks_async)
@@ -192,15 +194,35 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
         }
     });
 
+    // Used to trigger the drop implementations of what is stored in the state.
+    // testcontainers is one example of where cleanup is sometimes necessary.
+    let drop_state = if is_async {
+        quote!(
+            rt.block_on(rt.spawn(
+                async {
+                    // SAFETY: Nothing is touching the global state at this point.
+                    let items = unsafe { __GLOBAL.drain() };
+                    drop(items);
+                }
+            )).expect("unable to spawn drop task");
+        )
+    } else {
+        quote!(
+            // SAFETY: Nothing is touching the global state at this point.
+            let items = unsafe { __GLOBAL.drain() };
+            drop(items);
+        )
+    };
+
     quote!(
         #(#attrs)*
         #vis #mod_token #ident {
             #(#other)*
 
-            type AnyMapValue = ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>;
-            type AnyMap = ::std::collections::HashMap<::std::any::TypeId, AnyMapValue>;
-            type LazyMap = ::suitest::internal::once_cell::sync::Lazy<AnyMap>;
-            static mut __GLOBAL: LazyMap = LazyMap::new(|| AnyMap::new());
+            type __AnyMapValue = ::std::boxed::Box<dyn ::std::any::Any + Send + Sync>;
+            type __AnyMap = ::std::collections::HashMap<::std::any::TypeId, __AnyMapValue>;
+            type __LazyMap = ::suitest::internal::once_cell::sync::Lazy<__AnyMap>;
+            static mut __GLOBAL: __LazyMap = __LazyMap::new(|| __AnyMap::new());
 
             #local_map
 
@@ -232,11 +254,15 @@ pub fn impl_suite(id: Ident, item_mod: ItemMod) -> proc_macro2::TokenStream {
 
                 #exec_async
 
+                if errors.is_empty() {
+                    #aa_invoke
+                }
+
+                #drop_state
+
                 if let Some(e) = errors.pop() {
                     ::std::panic::resume_unwind(e);
                 }
-
-                #aa_invoke
             }
         }
     )
@@ -482,8 +508,8 @@ fn quote_state_getters(
                 // SAFETY: Multiple immutable references are fine.
                 // We are never modifying the __GLOBAL state other
                 // than in *_all hooks, only reading from it.
-                let #id: #ty = unsafe {
-                    let item = LOCAL[LOCAL_ID]
+                let #id: &#ty = unsafe {
+                    let item = __LOCAL[LOCAL_ID]
                         .get(&::std::any::TypeId::of::<#ty>())
                         .or_else(|| {
                             #local_miss
@@ -492,7 +518,6 @@ fn quote_state_getters(
                         .expect(#expect);
                     item
                         .downcast_ref::<#ty>()
-                        .cloned()
                         .unwrap_or_else(||
                             panic!(
                                     "downcast to '{}' failed; expected '{:?}', found '{:?}'",
@@ -508,13 +533,12 @@ fn quote_state_getters(
                 // SAFETY: Multiple immutable references are fine.
                 // We are never modifying the global state other
                 // than in *_all hooks, only reading from it.
-                let #id: #ty = unsafe {
+                let #id: &#ty = unsafe {
                     let item = __GLOBAL
                         .get(&::std::any::TypeId::of::<#ty>())
                         .expect(#expect);
                     item
                         .downcast_ref::<#ty>()
-                        .cloned()
                         .unwrap_or_else(||
                             panic!(
                                     "downcast to '{}' failed; expected '{:?}', found '{:?}'",
@@ -551,7 +575,7 @@ fn quote_state_setters(
     verbose: bool,
 ) -> proc_macro2::TokenStream {
     let state_map = if local {
-        quote!(let state = unsafe { &mut LOCAL[LOCAL_ID] };)
+        quote!(let state = unsafe { &mut __LOCAL[LOCAL_ID] };)
     } else {
         quote!(let state = unsafe { &mut __GLOBAL };)
     };
@@ -667,7 +691,7 @@ fn quote_test_declarations(tests: &[TestFn], verbose: bool) -> proc_macro2::Toke
 
         let new_attrs = attrs.iter().filter(|attr|!attr.meta.path().is_ident("test"));
 
-        let msg = format!("Running test - {ident}");
+        let msg = format!("{ident} - starting test");
         let print = verbose.then_some(quote!(println!(#msg);));
 
         let toks =quote!(

@@ -2,6 +2,7 @@
 
 pub use suitest_macros::*;
 
+#[doc(hidden)]
 pub mod internal {
     pub use futures_util;
     pub use once_cell;
