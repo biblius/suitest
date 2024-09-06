@@ -1,16 +1,12 @@
 # suitest
 
-A library that provides procedural macros for easily setting up test hooks and configuring test states.
+Procedural macros for easily setting up test hooks and configuring test states.
 
 ## Example
 
 ```rust
-#![cfg(test)]
-
-use suitest::{suite, suite_cfg};
-
-#[suite(my_test_suite)]
-#[suite_cfg(sequential = false, verbose = true)]
+#[suitest::suite(my_test_suite)]
+#[suitest::suite_cfg(sequential = false, verbose = true)]
 pub mod tests {
     use suitest::{after_all, after_each, before_all, before_each, cleanup};
 
@@ -41,27 +37,18 @@ pub mod tests {
 
     #[after_all]
     async fn teardown(bar: usize, my_stuff: MyTestStruct) {
-        assert_eq!(bar, 420);
+        assert_eq!(*bar, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 
     #[test]
     fn works(works: String, foo: u8, bar: usize, my_stuff: MyTestStruct) {
         assert_eq!(works, "works");
-        assert_eq!(foo, 69);
-        assert_eq!(bar, 420);
-        assert_eq!(my_stuff.qux, 69);
-    }
-
-    #[test]
-    async fn works_too(works: String, foo: u8, bar: usize, my_stuff: MyTestStruct) {
-        assert_eq!(works, "works");
-        assert_eq!(foo, 69);
-        assert_eq!(bar, 420);
+        assert_eq!(*foo, 69);
+        assert_eq!(*bar, 420);
         assert_eq!(my_stuff.qux, 69);
     }
 }
-
 ```
 
 ## How it works
@@ -75,17 +62,74 @@ Mark tests with `#[test]` as you normally would, suitest uses these annotations 
 The available hooks are:
 
 - `before_all`
-  - Runs at the beginning of the suite
+  - Runs at the beginning of the suite and sets up the global state.
 - `before_each`
-  - Runs before each test in the suite
+  - Runs before each test in the suite and sets up its local state.
 - `after_each`
-  - Runs after each test in the suite
+  - Runs after each passing test in the suite. Can read the local and global states.
 - `after_all`
-  - Runs after the whole suite has passed
+  - Runs after the whole suite has passed. Does not run if any of the tests fail. Can read only
+    the global state.
 - `cleanup`
-  - Runs after any test fails. Ideally should never panic.
+  - Runs after any test fails. Can read global and local states.
 
-suitest works with async functions, but depends on tokio so you need to have it in your dependencies. Any hook and test can be marked as async and you are allowed to mix and match, i.e. use async hooks with sync tests and vice versa.
+The `before_all` and `before_each` hooks are the only hooks able
+to mutate the global and test local states, respectively.
+
+In order to share data between tests and hooks, return an arbitrary tuple from the `before_*` hooks.
+Whatever is returned is then available in the following hooks/tests as immutable references.
+By adding the same type signatures in hook/test function parameters, the values can be read;
+
+```rust
+#[suitest::suite(my_test_suite)]
+mod tests {
+    use suitest::{before_all, before_each, after_all, after_each};
+
+    #[before_all]
+    fn setup_global_state() -> (String, usize) {
+        let hello = String::from("Hello");
+        (hello, 420)
+    }
+
+    #[before_each]
+    fn setup_local_state(hello: String, n: usize) -> String {
+        assert_eq!(*n, 420);
+        assert_eq!(hello, "Hello");
+        let world = String::from("World");
+        world
+    }
+
+    #[test]
+    fn test(s: String, n: usize) {
+        assert_eq!(*n, 420);
+        assert_eq!(s, "World");
+    }
+
+    #[after_each]
+    fn read_both_states(world: String, n: usize) {
+        assert_eq!(*n, 420);
+        assert_eq!(world, "World");
+    }
+
+    #[after_all]
+    fn read_global_state(hello: String, n: usize) {
+        assert_eq!(*n, 420);
+        assert_eq!(hello, "Hello");
+    }
+}
+```
+
+In the above example, the `before_all` hook inserts a `String` and `usize`
+in the global state. The `before_each` hook has access to whatever
+is in the global state, however it also returns a `String` type. Since `before_each`
+is a local hook, the `String` it returns will be stored in the local state for each test
+and will have precedence.
+Local state always has priority over the global state. We can see that in the test
+and `after_each` assertions. Finally, we can see `after_all` reads only the data
+from the global state, as it gets executed after all tests have passed.
+
+`suitest` works with async functions, but depends on tokio so you need to have it in your dependencies. Any hook and test can be marked as async and you are allowed to mix and match, i.e. use async hooks with sync tests and vice versa.
+Keep in mind if any of the hooks/tests are async, a tokio runtime will need to be constructed.
 
 ### Config
 
@@ -99,16 +143,79 @@ suitest works with async functions, but depends on tokio so you need to have it 
 
 ### State
 
-The test suite consist of 2 types of state; The global state which is available in the whole test suite and the local state which is local to tests.
+The test suite consist of 2 types of state;
+The global state which is available in the whole test suite and the local state which is local to tests.
 
-The `*_all` are the only hooks that can mutate items in the global state. Tests and local hooks can only read from it.
+These states are stored in variables `__GLOBAL` and `__LOCAL`. These variables are generated by the procedural macros.
 
-The `*_each` hooks can mutate items in the local test states. Tests each get their own copy of the state provided in these hooks, which is also read only.
+`__GLOBAL` is a static hash map with signature `HashMap<TypeId, Box<dyn Any>>`.
 
-To add items to the states described above, all you need to do is make the hooks return an arbitrary tuple. This will generate code that inserts the provided parameters into the states.
+`__LOCAL` is an array of the same maps.
 
-To get the hold of the items, add the necessary parameters to the function's arguments. Local states have priority over the global one.
+Each test will have a unique identifier in the suite. Specifically, `suitest` rewires
 
-Each state can hold a single value per type. This means that if you insert any type more than once in the state, only the last entry will be in the map. If you need to insert multiple values of the same type, use a tuple.
+```rust
+#[test]
+fn my_test() {}
+```
 
-Every hook and test will always attempt to retrieve items from its local state before trying to retrieve it from the global. The test/hook panics if it cannot find it in neither.
+to
+
+```rust
+fn my_test<const LOCAL_ID: usize>() {}
+```
+
+The `LOCAL_ID` is used in `my_test` to index into the `__LOCAL` array to obtain the map for that test.
+The same `LOCAL_ID` is used in `before_each`, `after_each` and `cleanup`.
+
+#### State cheatsheet
+
+The `before_all` hook is the only hook able to mutate the global state.
+Tests and local hooks can only read from it.
+
+The `before_each` hook can mutate items in the local test states.
+Tests each get their own copy of the state provided in these hooks, which is also read only.
+
+The `after_each` hook can read items from both the global and local state.
+Local states have priority, meaning if a type is returned from both the
+`before_all` and `before_each` hooks, the one from `before_each` will be read.
+
+The `after_all` hook can only read items from the global state.
+
+To store items to the states described above, all you need to do is make the hooks return an arbitrary tuple.
+This will generate code that inserts the provided parameters into the states.
+
+To read items, add the same type parameters to the function's arguments.
+Local states have priority over the global one.
+
+Even though the signatures are written as owned values, ALL items returned from
+states will be references to prevent cloning them.
+
+Each state can hold a single value per type.
+This means that if you insert any type more than once in the state, only the last entry will be in the map.
+If you need to insert multiple values of the same type, use a tuple.
+
+Every hook and test will always attempt to retrieve items from its local state
+before trying to retrieve it from the global.
+The test/hook panics if it cannot find it in neither.
+
+Use variables instead of constructing values in return positions, i.e. instead of
+
+```rust
+use suitest::before_all;
+#[before_all]
+fn setup() -> String {
+    String::new()
+}
+```
+
+you should use
+
+```rust
+use suitest::before_all;
+#[before_all]
+fn setup() -> String {
+    let s = String::new();
+    s
+}
+```

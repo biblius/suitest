@@ -11,7 +11,7 @@ mod suite;
 ///
 /// ## Example
 ///
-/// ```
+/// ```ignore
 /// #[suitest::suite(my_test_suite)]
 /// mod my_tests {
 ///   use suitest::{before_all, after_all};
@@ -19,7 +19,8 @@ mod suite;
 ///   // Set up global state.
 ///   #[before_all]
 ///   fn setup() -> String {
-///     String::from("Hello world")
+///     let hello = String::from("Hello world");
+///     hello
 ///   }
 ///
 ///   #[after_all]
@@ -28,8 +29,8 @@ mod suite;
 ///   }
 ///
 ///   #[test]
-///   fn my_test() {
-///     // ...
+///   fn my_test(hw: String) {
+///     assert_eq!(hw, "Hello world");
 ///   }
 /// }
 /// ```
